@@ -91,3 +91,5 @@ dmypy.json
 .prof
 
 .DS_Store
+
+*dataset
