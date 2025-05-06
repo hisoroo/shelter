@@ -6,6 +6,7 @@ import re
 import traceback
 from typing import Callable, List, Optional
 import uuid
+import time
 
 import requests
 from bs4 import BeautifulSoup
@@ -24,7 +25,8 @@ class Scraper:
                  pet_name_finder: PetNameFinder,
                  image_url_finder: ImageUrlFinder,
                  start_page: int = 1, end_page: int = 5,
-                 headers: Optional[dict] = None, timeout: int = 15):
+                 headers: Optional[dict] = None, timeout: int = 15,
+                 proxies: Optional[dict] = None):
         """
         Inicjalizuje scraper z wymaganymi funkcjami parsowania.
 
@@ -38,15 +40,23 @@ class Scraper:
             end_page: Numer strony listy, na której skończyć.
             headers: Nagłówki HTTP do użycia w żądaniach.
             timeout: Timeout dla żądań HTTP.
+            proxies: Słownik proxy do użycia w żądaniach (np. {'http': 'http://proxy.example.com:8080'}).
         """
         self.base_list_url = base_list_url
         self.output_dir = output_dir
         self.start_page = start_page
         self.end_page = end_page
         self.headers = headers or {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Connection': 'keep-alive',
+            'Referer': 'https://google.com',  
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
         }
         self.timeout = timeout
+        self.proxies = proxies
 
         self.find_profile_links = profile_link_finder
         self.find_pet_name = pet_name_finder
@@ -81,8 +91,9 @@ class Scraper:
     def _make_request(self, url: str) -> Optional[BeautifulSoup | int]:
         """Wykonuje żądanie GET i zwraca obiekt BeautifulSoup."""
         try:
+            time.sleep(1)
             response = requests.get(
-                url, headers=self.headers, timeout=self.timeout)
+                url, headers=self.headers, timeout=self.timeout, proxies=self.proxies)
             if response.status_code == 404:
                 print(f"  Info: Strona {url} nie znaleziona (404).")
                 return 404
@@ -106,7 +117,7 @@ class Scraper:
 
         try:
             img_response = requests.get(
-                img_url, headers=self.headers, timeout=self.timeout, stream=True)
+                img_url, headers=self.headers, timeout=self.timeout, stream=True, proxies=self.proxies)
             img_response.raise_for_status()
 
             with open(save_path, 'wb') as f:
@@ -122,6 +133,12 @@ class Scraper:
             print(
                 f"      Nieoczekiwany błąd podczas przetwarzania obrazu {img_url}: {general_e}")
         return False
+    
+    def _get_page_url(self, page_number: int) -> str:
+        """Generuje URL dla danego numeru strony listy."""
+        if page_number > 1:
+            return f"{self.base_list_url.rstrip('/')}/page/{page_number}/"
+        return self.base_list_url
 
     def collect_profile_urls(self):
         """Faza 1: Zbieranie linków do profili zwierząt używając dostarczonej funkcji."""
@@ -130,7 +147,7 @@ class Scraper:
             f"Przeszukiwanie stron listy od {self.start_page} do {self.end_page}...")
 
         for i in range(self.start_page, self.end_page + 1):
-            current_list_url = f"{self.base_list_url.rstrip('/')}/page/{i}/" if i > 1 else self.base_list_url
+            current_list_url = self._get_page_url(i)
 
             print(f"\nPrzetwarzanie strony listy {i}: {current_list_url}")
             result = self._make_request(current_list_url)
@@ -189,6 +206,21 @@ class Scraper:
                     f"  Pominięto profil {profile_url} z powodu błędu pobierania.")
                 continue
 
+            try:
+                profile_image_urls = self.find_image_urls(
+                    profile_soup, profile_url)
+            except Exception as e:
+                print(
+                    f"  Błąd podczas wywoływania funkcji find_image_urls dla {profile_url}: {e}")
+                traceback.print_exc()
+                profile_image_urls = []
+
+            if not profile_image_urls:
+                print(
+                    f"  Informacja: Nie znaleziono obrazów na stronie profilu {profile_url}. Pomijanie.")
+                continue
+
+            pet_dir: str
             if profile_url in profile_to_folder_map:
                 pet_dir = profile_to_folder_map[profile_url]
                 print(
@@ -198,7 +230,7 @@ class Scraper:
                     pet_name = self.find_pet_name(profile_soup)
                 except Exception as e:
                     print(
-                        f"  Błąd podczas wywoływania funkcji find_pet_name: {e}")
+                        f"  Błąd podczas wywoływania funkcji find_pet_name dla {profile_url}: {e}")
                     traceback.print_exc()
                     pet_name = None
 
@@ -212,20 +244,6 @@ class Scraper:
                 pet_dir = os.path.join(self.output_dir, folder_name)
                 os.makedirs(pet_dir, exist_ok=True)
                 profile_to_folder_map[profile_url] = pet_dir
-
-            try:
-                profile_image_urls = self.find_image_urls(
-                    profile_soup, profile_url)
-            except Exception as e:
-                print(
-                    f"  Błąd podczas wywoływania funkcji find_image_urls: {e}")
-                traceback.print_exc()
-                profile_image_urls = []
-
-            if not profile_image_urls:
-                print(
-                    f"  Ostrzeżenie: Nie znaleziono obrazów w galerii dla folderu '{os.path.basename(pet_dir)}'.")
-                continue
 
             print(f"  Znaleziono {len(profile_image_urls)} obrazów w galerii.")
 
